@@ -1,0 +1,30 @@
+# Template systemd user unit for the zero-token Claude Code proxy.
+#
+# Usage:
+#   1. Copy to ~/.config/systemd/user/claude-web-proxy.service
+#   2. Replace USER with your real username (or run:
+#        sed -i "s|/home/USER|$HOME|g" ~/.config/systemd/user/claude-web-proxy.service)
+#   3. systemctl --user daemon-reload
+#   4. systemctl --user enable --now claude-web-proxy.service
+#
+# The historical name "claude-web-proxy" is preserved so that any pre-existing
+# drop-in (`hermes-gateway.service.d/zero-token.conf`) still resolves.
+
+[Unit]
+Description=Claude Code subprocess proxy for hermes-agent (zero-token)
+Documentation=https://github.com/reyerchu/my_hermes/tree/main/zero-token
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust both paths if your venv or checkout lives elsewhere.
+ExecStart=/home/USER/.hermes/zero-token-runtime/venv/bin/python /home/USER/.hermes/hermes-agent/zero-token/claude_code_proxy.py
+Environment=LOG_LEVEL=INFO
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

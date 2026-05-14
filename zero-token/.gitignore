@@ -1,0 +1,10 @@
+# Runtime state and secrets — never commit
+.session-initialized
+.env
+.env_local
+.env.local
+
+# Python build artefacts (proxy venv lives outside the repo anyway)
+venv/
+__pycache__/
+*.pyc
