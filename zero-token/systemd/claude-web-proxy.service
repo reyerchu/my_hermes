@@ -15,16 +15,28 @@ Description=Claude Code subprocess proxy for hermes-agent (zero-token)
 Documentation=https://github.com/reyerchu/my_hermes/tree/main/zero-token
 After=network-online.target
 Wants=network-online.target
+# Allow up to 10 restarts within 60 s before systemd gives up (avoids tight
+# crash-loop on a permanent breakage, but tolerates the occasional SIGHUP).
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
 # Adjust both paths if your venv or checkout lives elsewhere.
 ExecStart=/home/USER/.hermes/zero-token-runtime/venv/bin/python /home/USER/.hermes/hermes-agent/zero-token/claude_code_proxy.py
 Environment=LOG_LEVEL=INFO
-Restart=on-failure
+# Restart on ANY non-clean exit (signal kills included) — the proxy got SIGHUP
+# under unidentified conditions in early use, so we don't want Restart=on-failure
+# to ever decide it was a success exit and stay down.
+Restart=always
 RestartSec=5
+# Detach from any user-session TTY so SIGHUP at logout/disconnect can't reach
+# the process via its controlling terminal.
+StandardInput=null
 StandardOutput=journal
 StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=15
 
 [Install]
 WantedBy=default.target

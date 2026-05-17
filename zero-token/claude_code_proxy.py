@@ -34,6 +34,12 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 
+# Defence-in-depth: ignore SIGHUP at the proxy itself.  Even if start_new_session
+# fails to fully isolate claude's process group on some kernel/setup, an HUP
+# arriving at us will be discarded rather than terminating the server.
+import signal as _signal
+_signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
+
 LISTEN_HOST = os.environ.get("CLAUDE_PROXY_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("CLAUDE_PROXY_PORT", "3031"))
 DEFAULT_MODEL = os.environ.get("CLAUDE_PROXY_MODEL", "claude-sonnet-4-6")
@@ -115,18 +121,28 @@ def _build_claude_args(prompt: str, resume: bool) -> list[str]:
         args += ["--resume", SESSION_UUID]
     else:
         args += ["--session-id", SESSION_UUID]
-    args.append(prompt)
+    # "--" terminates option parsing; otherwise prompts starting with "-"
+    # (e.g. a bullet list "- foo") get rejected by claude as unknown flag.
+    args.extend(["--", prompt])
     return args
 
 
 async def _run_claude_once(prompt: str, resume: bool) -> tuple[int, bytes, bytes]:
     args = _build_claude_args(prompt, resume)
     LOG.info("spawn claude: resume=%s prompt=%d chars", resume, len(prompt))
+    # IMPORTANT: start_new_session=True puts claude in its own session/process
+    # group.  Without this, claude (a Node.js process) inherits our pgid and
+    # any group-wide signal it issues during cleanup (e.g. kill(-pgid, SIGHUP)
+    # to reap tool subprocesses) propagates back to us, killing the proxy.
+    # We observed exactly this on 2026-05-17 21:28: proxy got SIGHUP 96s into
+    # a long multi-tool claude run with no other plausible source on the host.
     proc = await asyncio.create_subprocess_exec(
         *args,
         cwd=str(WORKSPACE),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.DEVNULL,
+        start_new_session=True,
         env={**os.environ, "CLAUDE_CODE_NONINTERACTIVE": "1"},
     )
     try:
