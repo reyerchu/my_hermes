@@ -56,8 +56,16 @@ SESSION_UUID = os.environ.get("CLAUDE_PROXY_SESSION_UUID", "22222222-3333-4444-5
 SESSION_FLAG = Path.home() / ".hermes/zero-token/.session-initialized"
 SESSION_FLAG.parent.mkdir(parents=True, exist_ok=True)
 
-# Hard-deadline per request (Claude Code can be slow with tools).
-REQUEST_TIMEOUT_S = int(os.environ.get("CLAUDE_PROXY_TIMEOUT", "300"))
+# Hard-deadline per request.  Reduced from 300 → 90 because:
+# in practice claude -p answers Telegram-style chat in <30 s; anything taking
+# 90+ s is stuck in a tool loop or on a stale session, and waiting longer just
+# multiplies pain (hermes retries 3 ×).  Fail fast, auto-reset, recover.
+REQUEST_TIMEOUT_S = int(os.environ.get("CLAUDE_PROXY_TIMEOUT", "90"))
+
+# After this many seconds of session lifetime, force a fresh session UUID so
+# context doesn't grow unbounded (the root cause of the 2026-05-22 stuck-loop
+# issue).  Default 4 h; override with CLAUDE_PROXY_SESSION_MAX_AGE.
+SESSION_MAX_AGE_S = int(os.environ.get("CLAUDE_PROXY_SESSION_MAX_AGE", "14400"))
 
 # System-prompt override fed via --append-system-prompt on every call.
 # Suppresses the user's global CLAUDE.md "confirm in zh+en then Go or not?" pattern
@@ -152,12 +160,29 @@ async def _run_claude_once(prompt: str, resume: bool) -> tuple[int, bytes, bytes
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        raise RuntimeError(f"claude -p timed out after {REQUEST_TIMEOUT_S}s")
+        # Auto-reset: a stuck session would otherwise keep failing on every
+        # retry.  Drop the flag so the NEXT call starts a brand-new session.
+        SESSION_FLAG.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"claude -p timed out after {REQUEST_TIMEOUT_S}s — session reset; retry your message"
+        )
     return proc.returncode or 0, stdout_b, stderr_b
 
 
 async def claude_code_call(prompt: str) -> dict[str, Any]:
     async with _lock:
+        # Session age cap: if the flag is older than SESSION_MAX_AGE_S, rotate
+        # to a fresh session so context doesn't snowball into 5-minute waits.
+        if SESSION_FLAG.exists():
+            try:
+                age = time.time() - SESSION_FLAG.stat().st_mtime
+                if age > SESSION_MAX_AGE_S:
+                    LOG.info("session age %.0fs > %ds; rotating to fresh session",
+                             age, SESSION_MAX_AGE_S)
+                    SESSION_FLAG.unlink(missing_ok=True)
+            except OSError:
+                pass
+
         resume_first = SESSION_FLAG.exists()
         rc, stdout_b, stderr_b = await _run_claude_once(prompt, resume=resume_first)
 
