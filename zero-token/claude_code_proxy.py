@@ -50,11 +50,38 @@ WORKSPACE = Path(
 )
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 
-# Stable UUID so every call resumes the same Claude Code session.
-SESSION_UUID = os.environ.get("CLAUDE_PROXY_SESSION_UUID", "22222222-3333-4444-5555-666666666666")
-# Per-workspace flag so we don't conflate session-state when cwd changes.
-SESSION_FLAG = Path.home() / ".hermes/zero-token/.session-initialized"
-SESSION_FLAG.parent.mkdir(parents=True, exist_ok=True)
+# Stored UUID for the *current* Claude Code session.  Holding it in a file
+# (not a constant) is what lets us truly rotate sessions: rotation deletes
+# the file, and the next call generates a brand-new UUID Claude Code has
+# never seen — so it really does start fresh.  The legacy hardcoded
+# 22222222-… UUID is kept as an env-override only for explicit pinning.
+SESSION_DIR = Path.home() / ".hermes/zero-token"
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_FILE = SESSION_DIR / "current-session-uuid"
+# Backwards-compatible "session has been initialised" marker (still touched
+# so external scripts checking for the old flag keep working).
+SESSION_FLAG = SESSION_DIR / ".session-initialized"
+
+
+def _current_session_uuid() -> str:
+    """Return the active session UUID, generating + persisting one if needed."""
+    env_pin = os.environ.get("CLAUDE_PROXY_SESSION_UUID")
+    if env_pin:
+        return env_pin
+    if SESSION_FILE.exists():
+        text = SESSION_FILE.read_text().strip()
+        if text:
+            return text
+    new = str(uuid.uuid4())
+    SESSION_FILE.write_text(new)
+    LOG.info("generated new session UUID: %s", new)
+    return new
+
+
+def _rotate_session() -> None:
+    """Force the next call to use a brand-new session UUID."""
+    SESSION_FILE.unlink(missing_ok=True)
+    SESSION_FLAG.unlink(missing_ok=True)
 
 # Hard-deadline per request.  Reduced from 300 → 90 because:
 # in practice claude -p answers Telegram-style chat in <30 s; anything taking
@@ -125,10 +152,11 @@ def _build_claude_args(prompt: str, resume: bool) -> list[str]:
         "--dangerously-skip-permissions",
         "--append-system-prompt", SYSTEM_OVERRIDE,
     ]
+    session_uuid = _current_session_uuid()
     if resume:
-        args += ["--resume", SESSION_UUID]
+        args += ["--resume", session_uuid]
     else:
-        args += ["--session-id", SESSION_UUID]
+        args += ["--session-id", session_uuid]
     # "--" terminates option parsing; otherwise prompts starting with "-"
     # (e.g. a bullet list "- foo") get rejected by claude as unknown flag.
     args.extend(["--", prompt])
@@ -160,11 +188,12 @@ async def _run_claude_once(prompt: str, resume: bool) -> tuple[int, bytes, bytes
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        # Auto-reset: a stuck session would otherwise keep failing on every
-        # retry.  Drop the flag so the NEXT call starts a brand-new session.
-        SESSION_FLAG.unlink(missing_ok=True)
+        # Auto-reset: a stuck session keeps failing on every retry, so
+        # rotate the UUID — the next call will use a UUID Claude Code has
+        # never seen and starts genuinely fresh.
+        _rotate_session()
         raise RuntimeError(
-            f"claude -p timed out after {REQUEST_TIMEOUT_S}s — session reset; retry your message"
+            f"claude -p timed out after {REQUEST_TIMEOUT_S}s — session rotated; retry your message"
         )
     return proc.returncode or 0, stdout_b, stderr_b
 
@@ -172,14 +201,14 @@ async def _run_claude_once(prompt: str, resume: bool) -> tuple[int, bytes, bytes
 async def claude_code_call(prompt: str) -> dict[str, Any]:
     async with _lock:
         # Session age cap: if the flag is older than SESSION_MAX_AGE_S, rotate
-        # to a fresh session so context doesn't snowball into 5-minute waits.
+        # to a fresh session UUID so context doesn't snowball.
         if SESSION_FLAG.exists():
             try:
                 age = time.time() - SESSION_FLAG.stat().st_mtime
                 if age > SESSION_MAX_AGE_S:
                     LOG.info("session age %.0fs > %ds; rotating to fresh session",
                              age, SESSION_MAX_AGE_S)
-                    SESSION_FLAG.unlink(missing_ok=True)
+                    _rotate_session()
             except OSError:
                 pass
 
@@ -194,8 +223,8 @@ async def claude_code_call(prompt: str) -> dict[str, Any]:
                 SESSION_FLAG.touch()
                 rc, stdout_b, stderr_b = await _run_claude_once(prompt, resume=True)
             elif resume_first and ("not found" in stderr.lower() or "does not exist" in stderr.lower()):
-                LOG.warning("stored session missing; retrying with --session-id (fresh)")
-                SESSION_FLAG.unlink(missing_ok=True)
+                LOG.warning("stored session missing; rotating to fresh UUID")
+                _rotate_session()
                 rc, stdout_b, stderr_b = await _run_claude_once(prompt, resume=False)
 
         if rc != 0:
@@ -317,16 +346,15 @@ async def handle_models(_request: web.Request) -> web.Response:
 async def handle_health(_request: web.Request) -> web.Response:
     return web.json_response({
         "ok": True,
-        "session_uuid": SESSION_UUID,
+        "session_uuid": _current_session_uuid(),
         "session_initialised": SESSION_FLAG.exists(),
         "workspace": str(WORKSPACE),
     })
 
 
 async def handle_reset(_request: web.Request) -> web.Response:
-    """POST /reset starts a fresh Claude Code session on the next call."""
-    if SESSION_FLAG.exists():
-        SESSION_FLAG.unlink()
+    """POST /reset rotates to a new session UUID on the next call."""
+    _rotate_session()
     return web.json_response({"ok": True, "reset": True})
 
 
@@ -342,7 +370,7 @@ def build_app() -> web.Application:
 def main() -> None:
     LOG.info("Starting claude-code proxy on %s:%d", LISTEN_HOST, LISTEN_PORT)
     LOG.info("Workspace: %s  Session UUID: %s  initialised=%s",
-             WORKSPACE, SESSION_UUID, SESSION_FLAG.exists())
+             WORKSPACE, _current_session_uuid(), SESSION_FLAG.exists())
     LOG.info("claude bin: %s", CLAUDE_BIN)
     web.run_app(build_app(), host=LISTEN_HOST, port=LISTEN_PORT, print=None)
 
