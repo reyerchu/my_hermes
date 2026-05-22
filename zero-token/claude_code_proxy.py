@@ -58,6 +58,11 @@ WORKSPACE.mkdir(parents=True, exist_ok=True)
 SESSION_DIR = Path.home() / ".hermes/zero-token"
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_FILE = SESSION_DIR / "current-session-uuid"
+# Empty MCP config so `claude -p` doesn't load any globally-configured MCP
+# servers on cold spawn (they were the main source of 90 s+ latency).
+EMPTY_MCP_CONFIG = SESSION_DIR / "empty-mcp.json"
+if not EMPTY_MCP_CONFIG.exists():
+    EMPTY_MCP_CONFIG.write_text('{"mcpServers": {}}')
 # Backwards-compatible "session has been initialised" marker (still touched
 # so external scripts checking for the old flag keep working).
 SESSION_FLAG = SESSION_DIR / ".session-initialized"
@@ -83,11 +88,12 @@ def _rotate_session() -> None:
     SESSION_FILE.unlink(missing_ok=True)
     SESSION_FLAG.unlink(missing_ok=True)
 
-# Hard-deadline per request.  Reduced from 300 → 90 because:
-# in practice claude -p answers Telegram-style chat in <30 s; anything taking
-# 90+ s is stuck in a tool loop or on a stale session, and waiting longer just
-# multiplies pain (hermes retries 3 ×).  Fail fast, auto-reset, recover.
-REQUEST_TIMEOUT_S = int(os.environ.get("CLAUDE_PROXY_TIMEOUT", "90"))
+# Hard-deadline per request.  Originally 300 s; tightened to 90 s when stuck
+# sessions were the dominant failure; bumped to 180 s once we discovered that
+# real Telegram tasks (file search, web fetch, multi-step tool use) legitimately
+# take >90 s.  180 s is the sweet spot: long enough for genuine tool loops,
+# short enough that the user sees a recovery message before giving up.
+REQUEST_TIMEOUT_S = int(os.environ.get("CLAUDE_PROXY_TIMEOUT", "180"))
 
 # After this many seconds of session lifetime, force a fresh session UUID so
 # context doesn't grow unbounded (the root cause of the 2026-05-22 stuck-loop
@@ -151,6 +157,13 @@ def _build_claude_args(prompt: str, resume: bool) -> list[str]:
         "--output-format", "json",
         "--dangerously-skip-permissions",
         "--append-system-prompt", SYSTEM_OVERRIDE,
+        # Disable MCP loading on cold spawn.  Each Telegram message spawns a
+        # fresh `claude -p` subprocess, and globally-configured MCP servers
+        # (Gmail/Calendar/Harvey/…) each open network connections on startup
+        # — which made cold-spawn latency exceed our 90 s budget.  The proxy
+        # uses Claude Code's built-in Bash/Read/Write/Edit/Grep instead.
+        "--strict-mcp-config",
+        "--mcp-config", str(EMPTY_MCP_CONFIG),
     ]
     session_uuid = _current_session_uuid()
     if resume:
