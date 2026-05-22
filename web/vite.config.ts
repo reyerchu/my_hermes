@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -92,6 +93,15 @@ export default defineConfig({
   build: {
     outDir: "../hermes_cli/web_dist",
     emptyOutDir: true,
+  },
+  test: {
+    environment: "jsdom",
+    globals: false,
+    include: ["src/**/*.test.{ts,tsx}"],
+    // The dev-only hermesDevToken plugin tries to fetch a live backend
+    // during transformIndexHtml — irrelevant for unit tests and would
+    // emit a noisy warning when the dashboard isn't running.
+    server: { deps: { inline: [] } },
   },
   server: {
     proxy: {
