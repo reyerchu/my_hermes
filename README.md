@@ -1,10 +1,18 @@
 <!-- ┄┄┄ reyerchu/my_hermes fork notice ┄┄┄ -->
-> **This is a fork of [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent)** that adds a
-> [`zero-token/`](./zero-token/) folder — a small Python proxy routing hermes's
-> LLM calls through the local `claude -p` CLI (Claude Code). The agent then
-> runs on your Anthropic subscription **without API tokens** and with full
-> local filesystem access (no claude.ai-web sandbox framing).
-> See [`zero-token/README.md`](./zero-token/README.md).
+> **This is a fork of [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent)** that adds two things on top of upstream:
+>
+> 1. **`zero-token/`** — a Python proxy routing hermes's LLM calls through the
+>    local `claude -p` CLI (Claude Code), so the agent runs on your Anthropic
+>    subscription **without API tokens** and with full local filesystem access
+>    (no claude.ai-web sandbox framing). See [`zero-token/README.md`](./zero-token/README.md).
+>
+> 2. **Expanded test coverage** — ~160 commits adding pure-function unit tests
+>    across the codebase (Python tests under `tests/agent/`, `tests/tools/`,
+>    `tests/gateway/`, `tests/plugins/`, `tests/hermes_cli/`, `tests/environments/`,
+>    plus a Vitest + jsdom test suite under `web/src/**/*.test.{ts,tsx}` for
+>    the React dashboard). 1238 test files, ~25k lines added; all green, no
+>    external deps. See `CHANGES.md` (TBD) or `git log 260773569..HEAD` for the
+>    full list.
 >
 > Upstream sync: `git fetch upstream && git merge upstream/main`.
 <!-- ┄┄┄ end fork notice ┄┄┄ -->
