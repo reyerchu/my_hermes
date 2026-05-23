@@ -123,7 +123,7 @@ hermes -z "what is the hostname of this machine?" --yolo
 | `CLAUDE_BIN` | `/home/<you>/.local/bin/claude` | path to the `claude` binary |
 | `CLAUDE_PROXY_WORKSPACE` | `$HOME` | cwd passed to `claude -p` |
 | `CLAUDE_PROXY_SESSION_UUID` | `22222222-…-666666666666` | stable session UUID so calls continue one conversation |
-| `CLAUDE_PROXY_TIMEOUT` | `300` (seconds) | hard per-request deadline |
+| `CLAUDE_PROXY_TIMEOUT` | `600` (seconds) | hard per-request deadline. Long-running tool loops (PPT editing, repo searches, multi-step debugging) routinely exceed 180 s; the proxy emits SSE keepalive comments every 15 s so the client connection survives the full window. |
 
 ## Security notes
 

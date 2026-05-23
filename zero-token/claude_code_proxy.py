@@ -88,12 +88,18 @@ def _rotate_session() -> None:
     SESSION_FILE.unlink(missing_ok=True)
     SESSION_FLAG.unlink(missing_ok=True)
 
-# Hard-deadline per request.  Originally 300 s; tightened to 90 s when stuck
-# sessions were the dominant failure; bumped to 180 s once we discovered that
-# real Telegram tasks (file search, web fetch, multi-step tool use) legitimately
-# take >90 s.  180 s is the sweet spot: long enough for genuine tool loops,
-# short enough that the user sees a recovery message before giving up.
-REQUEST_TIMEOUT_S = int(os.environ.get("CLAUDE_PROXY_TIMEOUT", "180"))
+# Hard-deadline per request.  History:
+#   * 300 s — original
+#   * 90  s — tightened when stuck sessions were the dominant failure
+#   * 180 s — bumped after real Telegram tasks (file search, web fetch,
+#             multi-step tool use) legitimately exceeded 90 s
+#   * 600 s — bumped again on 2026-05-23 after PPT-editing tasks (claude -p
+#             driving Read/Edit/Bash across many slides) hit 180 s mid-task.
+#             Keepalive SSE comments every 15 s mean the client connection
+#             stays healthy through the full window, so a longer deadline
+#             no longer trades UX for resilience.
+# Override per-instance via Environment=CLAUDE_PROXY_TIMEOUT=<seconds>.
+REQUEST_TIMEOUT_S = int(os.environ.get("CLAUDE_PROXY_TIMEOUT", "600"))
 
 # After this many seconds of session lifetime, force a fresh session UUID so
 # context doesn't grow unbounded (the root cause of the 2026-05-22 stuck-loop
