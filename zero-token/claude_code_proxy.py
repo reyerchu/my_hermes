@@ -293,6 +293,67 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             status=400,
         )
 
+    cid = f"chatcmpl-{uuid.uuid4()}"
+    created = int(time.time())
+    finish = "stop"
+
+    # Streaming path: open the SSE response immediately, run claude as a
+    # background task, and send periodic ":keepalive" comments while we wait
+    # so the client doesn't time out the connection on "no chunks yet".
+    if stream:
+        resp = web.StreamResponse(status=200, headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable any reverse-proxy buffering
+        })
+        await resp.prepare(request)
+        # First keepalive flushes headers + tells client the connection is live.
+        await resp.write(b": connected\n\n")
+
+        task = asyncio.create_task(claude_code_call(prompt))
+        try:
+            while not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # Still waiting on claude — send a keepalive comment.
+                    try:
+                        await resp.write(b": keepalive\n\n")
+                    except (ConnectionResetError, asyncio.CancelledError):
+                        task.cancel()
+                        raise
+            data = task.result()
+        except Exception as exc:
+            LOG.exception("claude-code call failed (stream)")
+            err_chunk = {
+                "id": cid, "object": "chat.completion.chunk", "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": f"\n\n[proxy error: {exc}]"},
+                             "finish_reason": "stop"}],
+            }
+            try:
+                await resp.write(f"data: {json.dumps(err_chunk)}\n\n".encode())
+                await resp.write(b"data: [DONE]\n\n")
+                await resp.write_eof()
+            except Exception:
+                pass
+            return resp
+
+        text = data.get("result") or ""
+        LOG.info("claude-code response: %d chars, cost=$%s",
+                 len(text), data.get("total_cost_usd"))
+        await resp.write(
+            f"data: {json.dumps(_build_chunk(cid, model, created, {'role': 'assistant', 'content': text}, None))}\n\n".encode()
+        )
+        await resp.write(
+            f"data: {json.dumps(_build_chunk(cid, model, created, {}, finish))}\n\n".encode()
+        )
+        await resp.write(b"data: [DONE]\n\n")
+        await resp.write_eof()
+        return resp
+
+    # Non-streaming path.
     try:
         data = await claude_code_call(prompt)
     except Exception as exc:
@@ -303,29 +364,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
 
     text = data.get("result") or ""
     usage = data.get("usage") or {}
-    cid = f"chatcmpl-{uuid.uuid4()}"
-    created = int(time.time())
-    finish = "stop"
-
     LOG.info("claude-code response: %d chars, cost=$%s",
              len(text), data.get("total_cost_usd"))
-
-    if stream:
-        resp = web.StreamResponse(status=200, headers={
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        })
-        await resp.prepare(request)
-        await resp.write(
-            f"data: {json.dumps(_build_chunk(cid, model, created, {'role': 'assistant', 'content': text}, None))}\n\n".encode()
-        )
-        await resp.write(
-            f"data: {json.dumps(_build_chunk(cid, model, created, {}, finish))}\n\n".encode()
-        )
-        await resp.write(b"data: [DONE]\n\n")
-        await resp.write_eof()
-        return resp
 
     return web.json_response({
         "id": cid,
