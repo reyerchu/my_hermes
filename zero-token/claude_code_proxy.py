@@ -314,8 +314,16 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             "X-Accel-Buffering": "no",  # disable any reverse-proxy buffering
         })
         await resp.prepare(request)
-        # First keepalive flushes headers + tells client the connection is live.
-        await resp.write(b": connected\n\n")
+        # First heartbeat: a real empty-delta chunk (not just an SSE
+        # comment).  OpenAI-style clients ignore ":..." comment lines
+        # when counting "chunks received", so a comment-only stream
+        # looks dead to them after their internal no-data deadline.
+        # Sending an actual data: line with finish_reason=null keeps
+        # the counter ticking and matches what OpenAI/Anthropic do.
+        heartbeat = json.dumps(_build_chunk(
+            cid, model, created, {"role": "assistant"}, None,
+        )).encode()
+        await resp.write(b"data: " + heartbeat + b"\n\n")
 
         task = asyncio.create_task(claude_code_call(prompt))
         try:
@@ -323,9 +331,13 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                 try:
                     await asyncio.wait_for(asyncio.shield(task), timeout=15.0)
                 except asyncio.TimeoutError:
-                    # Still waiting on claude — send a keepalive comment.
+                    # Still waiting on claude — emit an empty-delta data
+                    # chunk so the client's "no chunks yet" timer resets.
                     try:
-                        await resp.write(b": keepalive\n\n")
+                        beat = json.dumps(_build_chunk(
+                            cid, model, created, {}, None,
+                        )).encode()
+                        await resp.write(b"data: " + beat + b"\n\n")
                     except (ConnectionResetError, asyncio.CancelledError):
                         task.cancel()
                         raise
